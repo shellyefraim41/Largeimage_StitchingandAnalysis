@@ -28,13 +28,14 @@ python run_pipeline.py experiment_test.yaml --force-segmentation  # redo Cellpos
 python run_pipeline.py experiment_test.yaml --force               # redo everything
 ```
 
-For a new experiment, copy `experiment_test.yaml` and edit it:
+For a new experiment, copy `experiment_test.yaml` and edit it. It lists every option with a comment, and any line you delete uses the default. The main options are:
 - **`images`**: list the ND2 files.
 - **`merge_channels`**: `ask` prompts once at the start (Enter = all channels, `none` = no merge). You can also write a fixed list such as `[DAPI, RFP]`. The merged profile plot uses the same channels.
 - **`flatfield.reference`**: the flat-field reference ND2 for that session (see below).
 - **`channels`** (optional): the labels and colours are taken from the ND2 channel names automatically. A section written for one microscope is ignored for names that do not occur in the files.
 - **`segmentation.channels`**: `[DAPI]` for nuclei. For cytoplasmic signal use `[Phalloidin, DAPI]`. If a listed channel is not in the data, it is skipped with a warning. If none are found, the nuclear channel is used: its name contains DAPI, Hoechst or 405, or else it is the channel with the shortest emission wavelength.
 - All images in one config must have the same channels. The run stops at the start if they don't.
+- **`display: scale_bar`** (optional): a scale bar is drawn on the coloured PNGs and JPG previews, with the same length for every image in the experiment. `length_um: auto` picks a round length of about 12% of the image width. You can instead give a number, set `position: bottom-left`, `color: black`, or `enabled: false`. The data TIFFs have no bar but carry the µm calibration, so in Fiji use Analyze → Tools → Scale Bar.
 - **`reuse_settings`**: the path to an earlier run's `experiment/experiment_settings.json`. A batch processed later then uses exactly the same display ranges and segmentation normalisation.
 
 Runtime for the test data is about 8 min for both images, on the GPU.
@@ -59,8 +60,12 @@ Runtime for the test data is about 8 min for both images, on the GPU.
 <image>/channels/   <image>_<ch>.tif        corrected float32 data (µm calibrated, for ImageJ/Fiji)
                     <image>_<ch>.png        coloured, experiment-wide display range
                     <image>_<ch>_gray8.png, _preview.jpg
-<image>/merged/     <image>_merge_<chs>.png/.tif/_preview.jpg
-<image>/profiles/   one plot per channel + overlay of the merge channels
+<image>/merged/     <image>_merge_<chs>.png          full resolution, with scale bar (for viewing)
+                    <image>_merge_<chs>.tif          full resolution, no bar, µm calibrated (for Fiji / figures)
+                    <image>_merge_<chs>_preview.jpg  4000 px wide, with scale bar (quick look, slides)
+<image>/profiles/   one plot per channel (raw intensity)
+                    overlay of the merge channels (normalised, see below)
+                    <image>_merge_with_profile_<chs>.png  merged image with the overlay plot below, same X axis
 <image>/tables/     <image>_cells.csv       one row per cell (position, area, raw/bkg/net intensity, outlier flag)
                     <image>_profile_x.csv   per X-bin stats (mean, median, SEM, n cells, pixel mean, coverage)
 <image>/QC/         numbered figures in processing order
@@ -77,6 +82,7 @@ The data are binned along X (`profile.bin_um`, default 50 µm). In each bin:
 - **Cell count:** shown in the lower panel.
 - **Outlier cells** (debris, more than 20 robust SDs above the median) are excluded from both averages. They stay in the cell table with a flag.
 - **`profile.statistic: median`** plots the median instead of the mean.
+- **Normalisation in overlay plots:** in plots with several channels, each channel is divided by its average cell across the whole experiment. On the y-axis, 1 means the average cell of that channel, so a weak channel is no longer flattened by DAPI. The same factor is used for every image, so the images can still be compared with each other. Set `profile.overlay_normalize` to `image_mean` (each image scaled to its own average) or `none` (raw values). The factors are saved in `experiment_settings.json`, and the profile CSV has extra `*_norm` columns. The single-channel plots stay raw.
 
 ## Flat-field: important for acquisition
 

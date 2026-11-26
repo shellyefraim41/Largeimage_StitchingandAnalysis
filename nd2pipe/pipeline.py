@@ -437,12 +437,69 @@ def run(config_path, force=False, force_segmentation=False):
 
     ylims = {lab: ylim_for([lab]) for lab in labs}
     ov_sel = merge_sel if len(merge_sel) >= 2 else labs
-    ylim_ov = ylim_for(ov_sel)
+    # one scale-bar length for the whole experiment
+    sb = dict(dcfg.get("scale_bar") or {})
+    if sb.get("enabled", True) and str(sb.get("length_um", "auto")).lower() == "auto":
+        sb["length_um"] = reused["scale_bar_um"] if reused and reused.get("scale_bar_um") else render.nice_length_um(min(d["mosaic"].shape[2] * d["meta"]["pixel_um"]
+                                                    for d in data.values()))
+    if sb.get("enabled", True):
+        log(f"scale bar: {render.bar_label(float(sb['length_um']))}, {sb.get('position', 'bottom-right')}")
+    else:
+        sb = None
+    # normalisation of the multi-channel overlay (channels differ ~10x in brightness)
+    norm_mode = str(pcfg.get("overlay_normalize", "experiment_mean")).lower()
+    if norm_mode not in ("experiment_mean", "image_mean", "none"):
+        raise ValueError("profile.overlay_normalize must be experiment_mean, image_mean or none")
+    agg = np.median if stat == "median" else np.mean
+
+    def cell_average(cell_tables, lab):
+        v = np.concatenate([t.loc[~t[f"{lab}_outlier"], f"{lab}_mean"].to_numpy() for t in cell_tables])
+        a = float(agg(v)) if v.size else np.nan
+        return a if a > 0 else np.nan
+
+    if norm_mode == "experiment_mean":
+        if reused and reused.get("overlay_norm_factors"):
+            exp_factors = {k: float(v) for k, v in reused["overlay_norm_factors"].items()}
+        else:
+            exp_factors = {lab: cell_average([d["cells"] for d in data.values()], lab) for lab in labs}
+        factors = {n: exp_factors for n in data}
+        log("overlay normalised to the experiment average cell: "
+            + ", ".join(f"{k} {v:.2f}" for k, v in exp_factors.items()))
+    elif norm_mode == "image_mean":
+        factors = {n: {lab: cell_average([d["cells"]], lab) for lab in labs} for n, d in data.items()}
+        exp_factors = None
+    else:
+        factors, exp_factors = None, None
+    suffix = "_norm" if factors else ""
+    avg_word = "median" if stat == "median" else "average"
+    ov_ylabel = {"experiment_mean": f"intensity / experiment {avg_word} cell",
+                 "image_mean": f"intensity / image {avg_word} cell"}.get(norm_mode, "intensity − background (a.u.)")
+    for name, d in data.items():
+        p = d["prof"]
+        p.drop(columns=[c for c in p.columns if c.endswith("_norm")], inplace=True)
+        if factors:
+            f = p["channel"].map(factors[name]).astype(float)
+            for col in ("cell_mean", "cell_sem", "cell_median", "pixel_mean"):
+                p[f"{col}_norm"] = p[col] / f
+        p.to_csv(out / name / "tables" / f"{name}_profile_x.csv", index=False)
+
+    def ylim_overlay(sel):
+        lo, hi = 0.0, 0.0
+        for d in data.values():
+            p = d["prof"]
+            p = p[p["channel"].isin(sel) & p["enough_cells"]]
+            if len(p):
+                sem = p[f"cell_sem{suffix}"] if stat == "mean" else 0
+                lo = min(lo, float(np.nanmin(p[f"cell_{stat}{suffix}"] - sem)))
+                hi = max(hi, float(np.nanmax(p[f"cell_{stat}{suffix}"] + sem)))
+        return (lo * 1.05, hi * 1.1 if hi > 0 else 1)
+
+    ylim_ov = ylim_overlay(ov_sel)
     for name, d in data.items():
         base = out / name
         px = d["meta"]["pixel_um"]
-        render.render_image(d["mosaic"], d["valid"], labs, lut, ranges, merge_sel, base, name, px,
-                            dcfg["preview_width_px"])
+        small = render.render_image(d["mosaic"], d["valid"], labs, lut, ranges, merge_sel, base, name, px,
+                                    dcfg["preview_width_px"], sb)
         pdir = base / "profiles"
         pdir.mkdir(exist_ok=True)
         for c, lab in enumerate(labs):
@@ -450,7 +507,15 @@ def run(config_path, force=False, force_segmentation=False):
                                f"{name} - {lab}", pcfg["bin_um"], pcfg["min_cells_per_bin"], ylims[lab],
                                pcfg["show_pixel_mean"], stat)
         plots.plot_overlay(d["prof"], ov_sel, phex, pdir / f"{name}_profile_overlay_{'-'.join(ov_sel)}.png",
-                           f"{name} - {' + '.join(ov_sel)}", pcfg["bin_um"], pcfg["min_cells_per_bin"], ylim_ov, stat)
+                           f"{name} - {' + '.join(ov_sel)}", pcfg["bin_um"], pcfg["min_cells_per_bin"], ylim_ov,
+                           stat, suffix, ov_ylabel)
+        if small is not None:
+            H, W = d["mosaic"].shape[1:]
+            plots.plot_image_with_profile(
+                small, W * px, H * px, d["prof"], merge_sel, phex,
+                pdir / f"{name}_merge_with_profile_{'-'.join(merge_sel)}.png",
+                f"{name} - {' + '.join(merge_sel)}", pcfg["bin_um"], pcfg["min_cells_per_bin"],
+                ylim_overlay(merge_sel), stat, suffix, ov_ylabel)
         log(f"  [{name}] images and plots written")
 
     if len(data) > 1:
@@ -464,6 +529,8 @@ def run(config_path, force=False, force_segmentation=False):
     settings = {"experiment_name": cfg["experiment_name"], "channels": labs, "colors": colors,
                 "merge_channels": merge_sel, "segmentation_channels": seg_labs,
                 "segmentation_norm": seg_norm, "display_ranges": {k: list(v) for k, v in ranges.items()},
+                "scale_bar_um": float(sb["length_um"]) if sb else None,
+                "overlay_normalize": norm_mode, "overlay_norm_factors": exp_factors,
                 "profile": pcfg, "background": bcfg, "flatfield": {k: str(v) for k, v in cfg["flatfield"].items()},
                 "images": {n: {"source": d["meta"]["source"], "kind": d["meta"]["kind"],
                                "cells": int(d["labels"].max()), "flatfield": d["meta"]["flatfield"],

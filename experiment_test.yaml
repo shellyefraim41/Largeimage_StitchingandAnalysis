@@ -1,36 +1,65 @@
-# Experiment config: every image listed here is processed with the same settings,
-# display ranges and thresholds. Paths are relative to this file.
+# ===================================================================================
+# Experiment settings. Copy this file for a new experiment and edit it.
+# Every image listed here is processed the same way: same display, same thresholds.
+# Lines you delete fall back to the default shown in the comment.
+# Relative paths are relative to this file. For paths with spaces, use "quotes".
+# Check what is in your files first:  python run_pipeline.py <this file> --channels
+# ===================================================================================
 
 experiment_name: CHIR_CDM2_device_test
-output_dir: output/CHIR_CDM2_device_test
+output_dir: output/CHIR_CDM2_device_test     # use a new folder to keep an earlier run
 
-images:
-  - path: test/device_CHIRleftCDM2right_LGpoints.nd2   # 11 tiles -> stitched here
-    name: LGpoints
-  - path: test/device_CHIRleftCDM2right_LG.nd2         # already stitched by NIS
+# Display ranges, segmentation normalisation, overlay normalisation and scale bar of an
+# earlier run, so a later batch looks identical. Leave as null for the first run.
+reuse_settings: null      # e.g. output/MyExperiment/experiment/experiment_settings.json
+
+images:                   # as many as you like; tiled (points) or NIS-stitched, one entry per sample
+  - path: test/device_CHIRleftCDM2right_LGpoints.nd2
+    name: LGpoints        # short unique name, used in file names
+  - path: test/device_CHIRleftCDM2right_LG.nd2
     name: LG_NISstitched
 
-channels:                     # ND2 channel name -> label and colour (optional)
+# Optional: rename channels / choose colours (blue, green, red, magenta, cyan, yellow, gray, orange).
+# Channels not listed get an automatic label (from the ND2 name) and colour (from the wavelength).
+channels:
   DAPI-50: {label: DAPI, color: blue}
   GFP-50:  {label: GFP,  color: green}
   RFP-50:  {label: RFP,  color: red}
 
-# 'ask' = prompt once when the run starts (Enter = all, 'none' = no merge),
-# 'all', 'none', or a list such as [DAPI, RFP]
-merge_channels: ask
+# Channels in the merged image and merged plots:
+#   all | none | ask (asked once at the start) | a list such as [DAPI, RFP] (use the labels)
+merge_channels: all
 
-camera_offset: auto           # ORCA-Fusion offset is 100; 'auto' measures it
+camera_offset: auto       # auto, or a number (ORCA-Fusion: 100)
 
 flatfield:
-  method: auto                # auto: reference if given, else fitted from tile overlaps
-  reference: null             # e.g. flatfield/2026-11-22_chroma_slide.nd2 (same channel names)
+  method: auto            # auto: reference if given, else fitted from the tile overlaps | overlap | reference | none
+  reference: null         # flat-field reference ND2 of the session, e.g. flatfield/2026-11-22_slide.nd2
 
 stitching:
-  blend: feather              # feather | nearest
+  blend: feather          # feather (smooth seams) | nearest
+  min_ncc: 0.5            # tile pairs that match worse than this are placed by stage position
 
 segmentation:
-  channels: [DAPI]            # cytoplasmic RNA-FISH later: [Phalloidin, DAPI]
+  channels: [DAPI]        # nuclei: [DAPI]; whole cells: [Phalloidin, DAPI]; auto = nuclear channel
+  gpu: true
+  min_area_um2: 15        # smaller objects are removed (a nucleus is ~100 µm²)
 
 profile:
-  bin_um: 50
-  min_cells_per_bin: 10
+  bin_um: 50              # width of the X bins
+  min_cells_per_bin: 10   # bins with fewer cells are left as gaps
+  statistic: mean         # mean (± SEM) | median of the per-cell values
+  show_pixel_mean: true   # dashed line: mean of all cell pixels (single-channel plots)
+  outlier_mad: 20         # cells this far above typical are excluded as debris; null = keep all
+  # merged / overlay plots: experiment_mean (1 = average cell of that channel in this experiment,
+  # same factor for every image) | image_mean (each image to its own average) | none (raw intensity)
+  overlay_normalize: experiment_mean
+
+display:
+  high_percentile: 99.5   # brightest 0.5% of cell pixels are saturated in the PNGs
+  fixed: {}               # fixed display ranges, e.g. {DAPI: [0, 800], RFP: [0, 100]}
+  scale_bar:
+    enabled: true
+    length_um: auto       # auto (~12% of the image width, rounded) or a number in µm
+    position: bottom-right   # bottom-right | bottom-left
+    color: white          # white | black

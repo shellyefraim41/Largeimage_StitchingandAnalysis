@@ -60,12 +60,22 @@ DEFAULTS = {
         "show_pixel_mean": True,      # also plot the per-pixel (inside masks) mean
         "statistic": "mean",          # mean (± SEM) | median of the per-cell values
         "outlier_mad": 20,            # exclude cells > median + k*MAD (debris); null = keep all
+        # multi-channel overlay plots: experiment_mean (1 = average cell of that channel over all
+        # images, same factor for every image), image_mean (each image to its own average), none (raw)
+        "overlay_normalize": "experiment_mean",
     },
     "display": {
         "low": "background",          # 'background' (pooled background median) or a percentile number
         "high_percentile": 99.5,      # of in-cell pixels, pooled over all images
         "fixed": {},                  # {label: [low, high]} overrides
         "preview_width_px": 4000,
+        "scale_bar": {
+            "enabled": True,
+            "length_um": "auto",      # number (µm), or 'auto' = round value ~12% of the narrowest image
+            "position": "bottom-right",  # bottom-right | bottom-left
+            "color": "white",         # white | black
+            "label": True,            # write the length above the bar
+        },
     },
     "reuse_settings": None,           # path to experiment_settings.json of an earlier run
 }
