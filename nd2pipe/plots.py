@@ -17,7 +17,35 @@ import numpy as np
 INK = "#0b0b0b"
 INK2 = "#52514e"
 GRID = "#e4e3df"
-LINESTYLES = ["-", "--", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1))]
+LINESTYLES = ["-", "--", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1)), (0, (1, 1)), (0, (5, 2, 1, 2, 1, 2))]
+# colour-blind safe identity: colour + line style + marker shape (circle, square, triangle, star, ...)
+MARKERS = ["o", "s", "^", "*", "D", "v", "P", "X"]
+_ORDER = {}
+
+
+def set_series_order(names):
+    """Fix the style of each channel by its position in the experiment's channel list, so a
+    channel looks the same in every plot (also when only some channels are shown)."""
+    _ORDER.clear()
+    _ORDER.update({n: i for i, n in enumerate(names)})
+
+
+def series_style(name, k=0):
+    i = _ORDER.get(name, k)
+    return LINESTYLES[i % len(LINESTYLES)], MARKERS[i % len(MARKERS)]
+
+
+def _ms(marker):
+    return 10 if marker == "*" else 7
+
+
+def _line(ax, x, y, color, name, k=0, n_series=1, lw=2, label=None, with_ls=True):
+    """Line with its marker shape every ~1/12 of the length (staggered between series)."""
+    ls, mk = series_style(name, k)
+    step = max(1, len(x) // 12)
+    off = (k * step // max(n_series, 1)) % step
+    ax.plot(x, y, color=color, lw=lw, ls=ls if with_ls else "-", marker=mk, ms=_ms(mk),
+            markevery=(off, step), mec="white", mew=0.8, label=name if label is None else label)
 
 
 def _style(ax):
@@ -42,7 +70,8 @@ def _end_label(ax, x, y, text, color):
     i = np.nonzero(ok)[0][-1]
     ax.annotate(text, (x[i], y[i]), xytext=(6, 0), textcoords="offset points",
                 va="center", fontsize=9, color=INK)
-    ax.plot([x[i]], [y[i]], "o", ms=5, color=color, mec="white", mew=1.5, zorder=5)
+    mk = series_style(text)[1]
+    ax.plot([x[i]], [y[i]], mk, ms=_ms(mk), color=color, mec="white", mew=1.2, zorder=5)
 
 
 def _end_labels(ax, items, min_gap_pt=11):
@@ -69,7 +98,8 @@ def _end_labels(ax, items, min_gap_pt=11):
     for k, (px, py, text, color) in enumerate(pts):
         ax.annotate(text, (px, py), xytext=(6, placed[k] - shift - ypt[k]), textcoords="offset points",
                     va="center", fontsize=9, color=INK)
-        ax.plot([px], [py], "o", ms=5, color=color, mec="white", mew=1.5, zorder=5)
+        mk = series_style(text)[1]
+        ax.plot([px], [py], mk, ms=_ms(mk), color=color, mec="white", mew=1.2, zorder=5)
 
 
 def _count_panel(ax, d, bin_um, min_cells):
@@ -95,8 +125,8 @@ def plot_channel(prof, lab, color_hex, out_png, title, bin_um, min_cells, ylim=N
     if stat == "mean":
         _, sem = _series(d, "cell_sem")
         ax.fill_between(x, y - sem, y + sem, color=color_hex, alpha=0.15, lw=0)
-    ax.plot(x, y, color=color_hex, lw=2, solid_capstyle="round",
-            label=f"{lab}: mean of cells ± SEM" if stat == "mean" else f"{lab}: median of cells")
+    _line(ax, x, y, color_hex, lab, with_ls=False,
+          label=f"{lab}: mean of cells ± SEM" if stat == "mean" else f"{lab}: median of cells")
     _end_label(ax, x, y, lab, color_hex)
     if show_pixel:
         xp, yp = _series(d, "pixel_mean")
@@ -120,7 +150,7 @@ def _overlay_lines(ax, prof, labs, colors_hex, stat, suffix):
         if stat == "mean":
             _, sem = _series(d, f"cell_sem{suffix}")
             ax.fill_between(x, y - sem, y + sem, color=colors_hex[lab], alpha=0.12, lw=0)
-        ax.plot(x, y, color=colors_hex[lab], lw=2, ls=LINESTYLES[k % len(LINESTYLES)], label=lab)
+        _line(ax, x, y, colors_hex[lab], lab, k, len(labs))
         items.append((x, y, lab, colors_hex[lab]))
     if suffix:
         ax.axhline(1, color=INK2, lw=0.8, ls=":", zorder=1)
@@ -190,11 +220,13 @@ def plot_images_compare(profs: dict, lab, series_hex, out_png, title, ylim=None,
     """Same channel, all images of the experiment on one axis."""
     fig, ax = plt.subplots(figsize=(11, 4.2))
     items = []
+    saved = dict(_ORDER)
+    set_series_order(list(profs))  # here the series are images, not channels
     for k, (name, prof) in enumerate(profs.items()):
         d = prof[prof["channel"] == lab].sort_values("x_um")
         x, y = _series(d, f"cell_{stat}")
         col = series_hex[k % len(series_hex)]
-        ax.plot(x, y, color=col, lw=2, ls=LINESTYLES[k % len(LINESTYLES)], label=name)
+        _line(ax, x, y, col, name, k, len(profs))
         items.append((x, y, name, col))
     ax.set_xlabel("X position (µm)", color=INK2, fontsize=10)
     ax.set_ylabel(f"{stat} cell intensity − background (a.u.)", color=INK2, fontsize=10)
@@ -206,3 +238,5 @@ def plot_images_compare(profs: dict, lab, series_hex, out_png, title, ylim=None,
     _end_labels(ax, items)
     fig.savefig(out_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
+    _ORDER.clear()
+    _ORDER.update(saved)

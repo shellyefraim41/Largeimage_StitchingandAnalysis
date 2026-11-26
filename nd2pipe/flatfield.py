@@ -130,12 +130,14 @@ def foreground(samples, frac=0.3, min_counts=15.0):
 
 
 def fit_overlap_model(samples, H, W, degree=4, bleach_term=False, max_points=400_000,
-                      rng=np.random.default_rng(0)):
+                      rng=None, prefiltered=False):
     """Fit g = log F from overlap log-ratios with a robust ridge least-squares.
 
+    prefiltered=True: samples already restricted to foreground (pooled from several images).
     Returns (F (H,W) float32, info dict) or (None, info) when not enough data.
     """
-    m = foreground(samples)
+    rng = np.random.default_rng(0) if rng is None else rng
+    m = np.ones(samples["A"].size, bool) if prefiltered else foreground(samples)
     idx = np.nonzero(m)[0]
     info = {"n_points": int(idx.size)}
     if idx.size == 0:
@@ -190,3 +192,30 @@ def ratio_curve(samples, F=None, axis="x", nbins=20):
     k = np.digitize(pos, edges) - 1
     med = np.array([np.median(r[k == j]) if (k == j).sum() > 100 else np.nan for j in range(nbins)])
     return 0.5 * (edges[1:] + edges[:-1]), np.exp(med), np.exp(np.median(r))
+
+
+# ------------------------------------------------------------------ session pooling
+SAMPLE_KEYS = ("ya", "xa", "yb", "xb", "A", "B")
+
+
+def pool_samples(sample_list):
+    """Foreground points of several images (each thresholded on its own brightness), concatenated."""
+    parts = []
+    for smp in sample_list:
+        m = foreground(smp)
+        if m.any():
+            parts.append({k: smp[k][m] for k in SAMPLE_KEYS})
+    if not parts:
+        return {k: np.zeros(0) for k in SAMPLE_KEYS}
+    return {k: np.concatenate([q[k] for q in parts]) for k in SAMPLE_KEYS}
+
+
+def compare_flatfields(F_a, F_b):
+    """Differences between two illumination maps (both normalised to mean 1).
+    x_rms: along X (the direction the overlaps constrain and the profiles use);
+    field_rms: over the whole field."""
+    a, b = F_a / F_a.mean(), F_b / F_b.mean()
+    r = a / b - 1
+    xa, xb = a.mean(0), b.mean(0)
+    return {"x_rms": float(np.sqrt(np.mean((xa / xb - 1) ** 2))),
+            "field_rms": float(np.sqrt(np.mean(r ** 2)))}

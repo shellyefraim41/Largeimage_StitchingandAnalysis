@@ -26,6 +26,12 @@ DEFAULTS = {
         "poly_degree": 4,             # overlap model: 2D polynomial of log(illumination)
         "min_points": 2000,           # overlap points needed per channel
         "bleach_term": False,         # fit a constant 'second exposure is dimmer' factor
+        # channel with too little signal in its own overlaps: use the fit pooled from the other
+        # tiled images of the same session (same day, objective, camera, binning, pixel/tile size)
+        # if this image's other channels match that session within these limits
+        "session_pooling": True,
+        "session_check_x_rms": 0.03,      # along X (same-day images differ <= 1.6%)
+        "session_check_field_rms": 0.05,  # whole field (same-day images differ <= 3.1%)
     },
     "stitching": {
         "registration_channel": None, # default: segmentation channel

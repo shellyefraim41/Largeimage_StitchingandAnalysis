@@ -35,6 +35,11 @@ camera_offset: auto       # auto, or a number (ORCA-Fusion: 100)
 flatfield:
   method: auto            # auto: reference if given, else fitted from the tile overlaps | overlap | reference | none
   reference: null         # flat-field reference ND2 of the session, e.g. flatfield/2026-11-22_slide.nd2
+  # a channel with too little signal in its own overlaps uses the fit of the other tiled images
+  # acquired the SAME DAY with the same optics, if this image's other channels match them
+  session_pooling: true
+  session_check_x_rms: 0.03       # max difference along X allowed for the check
+  session_check_field_rms: 0.05   # max difference over the whole field
 
 stitching:
   blend: feather          # feather (smooth seams) | nearest

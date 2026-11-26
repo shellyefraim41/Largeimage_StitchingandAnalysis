@@ -21,7 +21,7 @@ import tifffile
 from . import flatfield as ffm
 from . import measure, plots, qc, render, segment, stitch
 from .config import IMAGE_SERIES_HEX, LUT_RGB, PLOT_HEX, default_color, default_label, load_config
-from .io_nd2 import iter_mips, read_info
+from .io_nd2 import iter_mips, read_info, session_key
 
 
 class Logger:
@@ -192,21 +192,53 @@ def zhists(mips, zarg, offset, n_z):
 
 
 # ------------------------------------------------------------------ pass 1
-def build_mosaic(cfg, item, labs, reg_idx, log):
-    name = item["name"]
+def _dirs(cfg, name):
     base = cfg["output_dir"] / name
     ddir, qdir = base / "data", base / "QC"
     ddir.mkdir(parents=True, exist_ok=True)
     qdir.mkdir(parents=True, exist_ok=True)
-    f_mosaic, f_valid, f_meta = ddir / f"{name}_corrected.tif", ddir / f"{name}_valid.tif", ddir / "meta.json"
-    if f_mosaic.exists() and f_valid.exists() and f_meta.exists() and not cfg["_force"]:
-        log(f"  [{name}] using cached corrected mosaic")
-        return tifffile.imread(str(f_mosaic)), tifffile.imread(str(f_valid)).astype(bool), \
-            json.loads(f_meta.read_text())
+    return ddir, qdir
 
-    info = read_info(item["path"])
+
+def load_cached(cfg, item, info):
+    """Cached mosaic or None. Tiled images also need their saved overlap samples
+    (used for session pooling); caches from older versions are rebuilt once."""
+    name = item["name"]
+    ddir, _ = _dirs(cfg, name)
+    f_mosaic, f_valid, f_meta = ddir / f"{name}_corrected.tif", ddir / f"{name}_valid.tif", ddir / "meta.json"
+    if cfg["_force"] or not (f_mosaic.exists() and f_valid.exists() and f_meta.exists()):
+        return None
+    meta = json.loads(f_meta.read_text())
+    if info.kind == "tiles" and (not (ddir / f"{name}_ffsamples.npz").exists() or "ff_own" not in meta):
+        return None
+    return {"mosaic": tifffile.imread(str(f_mosaic)), "valid": tifffile.imread(str(f_valid)).astype(bool),
+            "meta": meta}
+
+
+def load_samples(cfg, name, labs):
+    ddir, _ = _dirs(cfg, name)
+    z = np.load(ddir / f"{name}_ffsamples.npz")
+    return {lab: {k: z[f"{lab}__{k}"] for k in ffm.SAMPLE_KEYS} for lab in labs}
+
+
+def _write_mosaic(cfg, name, info, mosaic, valid, meta):
+    ddir, _ = _dirs(cfg, name)
+    tifffile.imwrite(str(ddir / f"{name}_corrected.tif"), mosaic.astype(np.float32), imagej=True,
+                     resolution=(1 / info.pixel_um, 1 / info.pixel_um),
+                     metadata={"axes": "CYX", "unit": "um"})
+    tifffile.imwrite(str(ddir / f"{name}_valid.tif"), valid.astype(np.uint8))
+    (ddir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+
+def prepare_image(cfg, item, info, labs, reg_idx, log):
+    """Max projection, offset, focus QC. Pre-stitched images are finished here.
+    Tiled images: registration, tile background, overlap samples and each channel's own
+    flat-field fit; the mosaic is assembled later (finish_tiles), once the flat-field
+    source of every channel is decided."""
+    name = item["name"]
+    ddir, qdir = _dirs(cfg, name)
     log(f"  [{name}] {info.kind}: {info.n_pos} position(s), Z={info.n_z}, channels={info.channels}, "
-        f"{info.width}x{info.height}px @ {info.pixel_um:.4f} µm")
+        f"{info.width}x{info.height}px @ {info.pixel_um:.4f} µm, acquired {info.extra.get('date', '?')}")
     t0 = time.time()
     mips, zargs = [], []
     for p, mip, zarg in iter_mips(info.path):
@@ -218,6 +250,7 @@ def build_mosaic(cfg, item, labs, reg_idx, log):
     offset = auto_offset(cfg, mips)
     log(f"  [{name}] camera offset per channel: {offset.tolist()}")
     meta = {"name": name, "source": str(info.path), "kind": info.kind, "pixel_um": info.pixel_um,
+            "acquired": info.extra.get("date", ""), "objective": info.extra.get("objective", ""),
             "channels": info.channels, "labels": labs, "n_z": info.n_z, "offset": offset.tolist(),
             "saturation": info.saturation, "warnings": [], "flatfield": {}}
     sat = [float((mips[:, c] >= info.saturation).mean()) for c in range(mips.shape[1])]
@@ -235,76 +268,241 @@ def build_mosaic(cfg, item, labs, reg_idx, log):
         meta["flatfield"] = {lab: "not applied: pre-stitched image has no tile layout" for lab in labs}
         meta["warnings"].append("pre-stitched image: illumination NOT corrected (see QC column profile)")
         meta["positions"] = None
-    else:
-        P, C, H, W = mips.shape
-        scfg = cfg["stitching"]
-        pos, table, sinfo = stitch.register_tiles(mips[:, reg_idx], info.stage_xy_um, info.pixel_um,
-                                                  offset[reg_idx], scfg["max_shift_px"], scfg["min_ncc"])
-        n_bad = sum(not t["ok"] for t in table)
-        log(f"  [{name}] registered {len(table)} pairs ({n_bad} fell back to stage), "
-            f"orientation {sinfo['orientation']}")
-        if n_bad:
-            meta["warnings"].append(f"{n_bad}/{len(table)} tile pairs could not be registered (stage position used)")
-        pd.DataFrame(table).to_csv(qdir / "02_registration_pairs.csv", index=False)
-        meta["positions"] = pos.tolist()
-        meta["tile_shape"] = [H, W]
-        meta["stitching"] = sinfo
-        pairs = [(t["i"], t["j"], t["final_dy"], t["final_dx"]) for t in table]
-        tbkg = tile_backgrounds(mips, offset, reg_idx)
-        meta["tile_background"] = {lab: tbkg[:, c].round(2).tolist() for c, lab in enumerate(labs)}
-        pd.DataFrame(tbkg, columns=labs).rename_axis("tile").to_csv(qdir / "02_tile_background.csv")
-        sub = offset[None, :] + tbkg  # (P, C) subtracted before flat-field division
+        _write_mosaic(cfg, name, info, mosaic, valid, meta)
+        return {"done": {"mosaic": mosaic, "valid": valid, "meta": meta}}
 
-        # ---- flat-field
-        fcfg = cfg["flatfield"]
-        method = fcfg["method"]
-        if method == "auto":
-            method = "reference" if fcfg.get("reference") else "overlap"
-        F = np.ones((C, H, W), np.float32)
-        samples_all = {}
-        if method == "reference":
-            F, notes = ffm.from_reference(fcfg["reference"], info.channels, offset, (H, W),
+    P, C, H, W = mips.shape
+    scfg = cfg["stitching"]
+    pos, table, sinfo = stitch.register_tiles(mips[:, reg_idx], info.stage_xy_um, info.pixel_um,
+                                              offset[reg_idx], scfg["max_shift_px"], scfg["min_ncc"])
+    n_bad = sum(not t["ok"] for t in table)
+    log(f"  [{name}] registered {len(table)} pairs ({n_bad} fell back to stage), "
+        f"orientation {sinfo['orientation']}")
+    if n_bad:
+        meta["warnings"].append(f"{n_bad}/{len(table)} tile pairs could not be registered (stage position used)")
+    pd.DataFrame(table).to_csv(qdir / "02_registration_pairs.csv", index=False)
+    meta["positions"] = pos.tolist()
+    meta["tile_shape"] = [H, W]
+    meta["stitching"] = sinfo
+    pairs = [(t["i"], t["j"], t["final_dy"], t["final_dx"]) for t in table]
+    tbkg = tile_backgrounds(mips, offset, reg_idx)
+    meta["tile_background"] = {lab: tbkg[:, c].round(2).tolist() for c, lab in enumerate(labs)}
+    pd.DataFrame(tbkg, columns=labs).rename_axis("tile").to_csv(qdir / "02_tile_background.csv")
+    sub = offset[None, :] + tbkg  # (P, C) subtracted before flat-field division
+
+    # ---- each channel's own flat-field
+    fcfg = cfg["flatfield"]
+    method = fcfg["method"]
+    if method == "auto":
+        method = "reference" if fcfg.get("reference") else "overlap"
+    own_F = np.ones((C, H, W), np.float32)
+    own = {}
+    samples = {lab: ffm.overlap_samples(mips[:, c], pairs, sub[:, c], info.saturation)
+               for c, lab in enumerate(labs)}
+    if method == "reference":
+        own_F, notes = ffm.from_reference(fcfg["reference"], info.channels, offset, (H, W),
                                           fcfg["smooth_sigma_px"])
-            meta["flatfield"] = {labs[i]: notes.get(ch, "") for i, ch in enumerate(info.channels)}
-        for c, lab in enumerate(labs):
-            samples_all[lab] = ffm.overlap_samples(mips[:, c], pairs, sub[:, c], info.saturation)
-            if method == "overlap":
-                Fc, finfo = ffm.fit_overlap_model(samples_all[lab], H, W, fcfg["poly_degree"], fcfg["bleach_term"])
-                if Fc is None or finfo["n_points"] < fcfg["min_points"]:
-                    meta["flatfield"][lab] = f"overlap: too few cell points ({finfo['n_points']}) -> not corrected"
-                    meta["warnings"].append(f"{lab}: flat-field not corrected (too little signal in overlaps)")
-                else:
-                    F[c] = Fc
-                    meta["flatfield"][lab] = (f"overlap fit, {finfo['n_points']} points, "
-                                              f"F range {Fc.min():.2f}-{Fc.max():.2f}")
-                    if finfo.get("unconstrained_terms"):
-                        meta["flatfield"][lab] += " (Y profile not constrained: no vertical neighbours)"
+        own = {labs[i]: {"ok": True, "method": "reference", "note": notes.get(ch, ""), "finfo": {}}
+               for i, ch in enumerate(info.channels)}
+    for c, lab in enumerate(labs):
+        if method == "overlap":
+            Fc, finfo = ffm.fit_overlap_model(samples[lab], H, W, fcfg["poly_degree"], fcfg["bleach_term"])
+            if Fc is None or finfo["n_points"] < fcfg["min_points"]:
+                own[lab] = {"ok": False, "method": "overlap", "finfo": finfo,
+                            "note": f"overlap: too few cell points ({finfo['n_points']})"}
             else:
-                finfo = {}
-            if method == "none":
-                meta["flatfield"][lab] = "none"
-            qc.flatfield(lab, F[c], samples_all[lab], finfo, method,
-                         qdir / f"03_flatfield_{c + 1}_{lab}.png")
-            x, r, m_after = ffm.ratio_curve(samples_all[lab], F[c], "x")
-            meta.setdefault("overlap_ratio_after", {})[lab] = float(m_after) if np.size(m_after) else None
-        tifffile.imwrite(str(ddir / f"{name}_flatfield.tif"), F, imagej=True, metadata={"axes": "CYX"})
-        log(f"  [{name}] flat-field ({method}): " + "; ".join(f"{k}: {v}" for k, v in meta["flatfield"].items()))
+                own_F[c] = Fc
+                note = f"overlap fit, {finfo['n_points']} points, F range {Fc.min():.2f}-{Fc.max():.2f}"
+                if finfo.get("unconstrained_terms"):
+                    note += " (Y profile not constrained: no vertical neighbours)"
+                own[lab] = {"ok": True, "method": "overlap", "finfo": finfo, "note": note}
+        elif method == "none":
+            own[lab] = {"ok": True, "method": "none", "finfo": {}, "note": "none"}
+    meta["ff_own"] = {lab: {"ok": v["ok"], "method": v["method"], "n_points": v["finfo"].get("n_points"),
+                            "note": v["note"]} for lab, v in own.items()}
+    np.savez_compressed(ddir / f"{name}_ffsamples.npz",
+                        **{f"{lab}__{k}": samples[lab][k].astype(np.float32 if k in ("A", "B") else np.int32)
+                           for lab in labs for k in ffm.SAMPLE_KEYS})
+    tifffile.imwrite(str(ddir / f"{name}_flatfield_own.tif"), own_F, imagej=True, metadata={"axes": "CYX"})
+    return {"info": info, "mips": mips, "sub": sub, "pos": pos, "table": table, "samples": samples,
+            "own_F": own_F, "own": own, "meta": meta, "reg_idx": reg_idx, "name": name}
 
-        # ---- assemble
-        corr = (mips.astype(np.float32) - sub[:, :, None, None]) / F[None]
-        mosaic, valid, _ = stitch.assemble(corr, pos, scfg["blend"])
-        before, _, _ = stitch.assemble(mips.astype(np.float32) - sub[:, :, None, None], pos, "nearest")
-        qc.layout(mosaic[reg_idx], pos, H, W, table, qdir / "02_tile_layout.png")
-        qc.seams(before, mosaic, valid, pos, H, W, labs, qdir / "04_seams_before_after.png")
-        del before, corr
-        log(f"  [{name}] mosaic {mosaic.shape[2]}x{mosaic.shape[1]} px")
 
-    tifffile.imwrite(str(f_mosaic), mosaic.astype(np.float32), imagej=True,
-                     resolution=(1 / info.pixel_um, 1 / info.pixel_um),
-                     metadata={"axes": "CYX", "unit": "um"})
-    tifffile.imwrite(str(f_valid), valid.astype(np.uint8))
-    f_meta.write_text(json.dumps(meta, indent=2))
-    return mosaic, valid, meta
+def finish_tiles(cfg, st, labs, session, log):
+    """Apply the decided flat-field per channel, write QC 02-04, assemble and cache the mosaic.
+    session: {lab: decision} for channels whose own fit failed (see SessionFlatfield.decide)."""
+    info, mips, sub, pos, meta, name = st["info"], st["mips"], st["sub"], st["pos"], st["meta"], st["name"]
+    ddir, qdir = _dirs(cfg, name)
+    P, C, H, W = mips.shape
+    F = st["own_F"].copy()
+    meta["flatfield"], meta["ff_session"] = {}, {}
+    meta["warnings"] = [w for w in meta["warnings"] if "flat-field" not in w]
+    for c, lab in enumerate(labs):
+        o = st["own"][lab]
+        finfo, method = o["finfo"], o["method"]
+        if o["ok"]:
+            meta["flatfield"][lab] = o["note"]
+        else:
+            d = session.get(lab) or {"source": "none", "reason": "session pooling off"}
+            meta["ff_session"][lab] = {k: v for k, v in d.items() if k not in ("F", "finfo")}
+            if d["source"] == "session":
+                F[c] = d["F"]
+                finfo, method = d["finfo"], "session"
+                meta["flatfield"][lab] = (f"{o['note']} -> session fit from {len(d['members'])} other image(s) of "
+                                          f"{d['day']} ({d['n_points']} points, F range {d['F'].min():.2f}-"
+                                          f"{d['F'].max():.2f}); check passed: {d['check_text']}")
+            else:
+                meta["flatfield"][lab] = f"{o['note']} -> not corrected ({d['reason']})"
+                meta["warnings"].append(f"{lab}: flat-field not corrected ({d['reason']})")
+        qc.flatfield(lab, F[c], st["samples"][lab], finfo, method, qdir / f"03_flatfield_{c + 1}_{lab}.png")
+        x, r, m_after = ffm.ratio_curve(st["samples"][lab], F[c], "x")
+        meta.setdefault("overlap_ratio_after", {})[lab] = float(m_after) if np.size(m_after) else None
+    f_check = qdir / "03_flatfield_session_check.png"
+    if session:
+        qc.session_check(name, session, labs, f_check)
+    elif f_check.exists():
+        f_check.unlink()
+    tifffile.imwrite(str(ddir / f"{name}_flatfield.tif"), F, imagej=True, metadata={"axes": "CYX"})
+    log(f"  [{name}] flat-field: " + "; ".join(f"{k}: {v}" for k, v in meta["flatfield"].items()))
+
+    scfg = cfg["stitching"]
+    corr = (mips.astype(np.float32) - sub[:, :, None, None]) / F[None]
+    mosaic, valid, _ = stitch.assemble(corr, pos, scfg["blend"])
+    before, _, _ = stitch.assemble(mips.astype(np.float32) - sub[:, :, None, None], pos, "nearest")
+    qc.layout(mosaic[st["reg_idx"]], pos, H, W, st["table"], qdir / "02_tile_layout.png")
+    qc.seams(before, mosaic, valid, pos, H, W, labs, qdir / "04_seams_before_after.png")
+    del before, corr
+    log(f"  [{name}] mosaic {mosaic.shape[2]}x{mosaic.shape[1]} px")
+    _write_mosaic(cfg, name, info, mosaic, valid, meta)
+    return {"mosaic": mosaic, "valid": valid, "meta": meta}
+
+
+class SessionFlatfield:
+    """Fallback for channels whose own overlap fit failed (too little signal): the fit pooled
+    from the other tiled images of the SAME session (same day, objective, camera, binning,
+    pixel size, tile size, channels) - used only if this image's well-measured channels match
+    the session within the limits (i.e. the optics really behaved the same)."""
+
+    def __init__(self, cfg, labs, infos, own_ok, get_samples, get_own_F):
+        self.labs = labs
+        self.fcfg = cfg["flatfield"]
+        self.keys = {n: session_key(i) for n, i in infos.items()}
+        self.own_ok, self.get_samples, self.get_own_F = own_ok, get_samples, get_own_F
+        self._fits = {}
+
+    def pooled_fit(self, members, lab):
+        key = (tuple(sorted(members)), lab)
+        if key not in self._fits:
+            pooled = ffm.pool_samples([self.get_samples(m)[lab] for m in key[0]])
+            H, W = self.get_own_F(key[0][0]).shape[1:]
+            self._fits[key] = ffm.fit_overlap_model(pooled, H, W, self.fcfg["poly_degree"],
+                                                    self.fcfg["bleach_term"], prefiltered=True)
+        return self._fits[key]
+
+    def decide(self, name, lab):
+        def none(reason, **kw):
+            return {"source": "none", "reason": reason, **kw}
+
+        if not self.fcfg.get("session_pooling", True):
+            return none("session pooling switched off")
+        key = self.keys.get(name)
+        if key is None:
+            return none("acquisition date unknown, cannot match a session")
+        others = [m for m, k in self.keys.items() if m != name and k == key]
+        if not others:
+            return none(f"no other tiled image from the same session ({key[0]}, same optics)")
+        donors = [m for m in others if self.own_ok[m][lab]]
+        if not donors:
+            return none(f"no other image of the session has enough {lab} signal")
+        F_s, inf_s = self.pooled_fit(donors, lab)
+        if F_s is None or inf_s["n_points"] < self.fcfg["min_points"]:
+            return none(f"too few {lab} points even pooled over the session")
+        checks = {}
+        own_F = self.get_own_F(name)
+        for c, k in enumerate(self.labs):
+            if k == lab or not self.own_ok[name][k]:
+                continue
+            ref = [m for m in others if self.own_ok[m][k]]
+            if not ref:
+                continue
+            F_ref, _ = self.pooled_fit(ref, k)
+            if F_ref is not None:
+                checks[k] = ffm.compare_flatfields(own_F[c], F_ref)
+                checks[k]["session_x"] = [round(float(v), 4) for v in (F_ref / F_ref.mean()).mean(0)[::8]]
+                checks[k]["own_x"] = [round(float(v), 4) for v in (own_F[c] / own_F[c].mean()).mean(0)[::8]]
+        tx = self.fcfg.get("session_check_x_rms", 0.03)
+        tf = self.fcfg.get("session_check_field_rms", 0.05)
+        text = ", ".join(f"{k} X {v['x_rms']:.1%} / field {v['field_rms']:.1%}" for k, v in checks.items())
+        common = {"day": key[0], "members": sorted(donors), "checks": checks, "check_text": text,
+                  "limits": {"x_rms": tx, "field_rms": tf},
+                  "session_x": [round(float(v), 4) for v in F_s.mean(0)[::8]]}
+        if not checks:
+            return none("no other channel of this image could be compared with the session", **common)
+        bad = [k for k, v in checks.items() if v["x_rms"] > tx or v["field_rms"] > tf]
+        if bad:
+            return none(f"illumination of {', '.join(bad)} differs from the session ({text}; "
+                        f"limits X {tx:.0%}, field {tf:.0%})", **common)
+        return {"source": "session", "F": F_s, "finfo": inf_s, "n_points": inf_s["n_points"], **common}
+
+
+def build_mosaics(cfg, infos, labs, reg_idx, log):
+    """Pass 1 for all images, with session pooling of the flat-field for weak channels."""
+    data, pending = {}, {}
+    for it in cfg["images"]:
+        name, info = it["name"], infos[it["name"]]
+        cached = load_cached(cfg, it, info)
+        if cached is not None:
+            log(f"  [{name}] using cached corrected mosaic")
+            data[name] = cached
+            continue
+        st = prepare_image(cfg, it, info, labs, reg_idx, log)
+        if "done" in st:
+            data[name] = st["done"]
+        elif all(v["ok"] for v in st["own"].values()):
+            data[name] = finish_tiles(cfg, st, labs, {}, log)   # nothing to decide: free memory now
+        else:
+            pending[name] = st                                  # decided after all images are read
+
+    order = [it["name"] for it in cfg["images"]]
+    tiled = [n for n in order if infos[n].kind == "tiles"]
+    own_ok = {n: ({lab: v["ok"] for lab, v in pending[n]["own"].items()} if n in pending else
+                  {lab: v["ok"] for lab, v in data[n]["meta"]["ff_own"].items()}) for n in tiled}
+    samples_cache = {}
+
+    def get_samples(n):
+        if n in pending:
+            return pending[n]["samples"]
+        if n not in samples_cache:
+            samples_cache[n] = load_samples(cfg, n, labs)
+        return samples_cache[n]
+
+    def get_own_F(n):
+        if n in pending:
+            return pending[n]["own_F"]
+        F = tifffile.imread(str(_dirs(cfg, n)[0] / f"{n}_flatfield_own.tif"))
+        return F.reshape(len(labs), *data[n]["meta"]["tile_shape"])
+
+    sess = SessionFlatfield(cfg, labs, {n: infos[n] for n in tiled}, own_ok, get_samples, get_own_F)
+    for n in tiled:
+        weak = [lab for lab in labs if not own_ok[n][lab]]
+        decisions = {lab: sess.decide(n, lab) for lab in weak}
+        for lab, d in decisions.items():
+            log(f"  [{n}] {lab}: own overlap fit too weak -> "
+                + (f"session flat-field from {d['members']} (check: {d['check_text']})"
+                   if d["source"] == "session" else f"not corrected: {d['reason']}"))
+        if n in pending:
+            data[n] = finish_tiles(cfg, pending.pop(n), labs, decisions, log)
+            continue
+        # cached: rebuild only if the decision changed (e.g. another image of the session was added)
+        want = {lab: [d["source"], d.get("members", [])] for lab, d in decisions.items()}
+        have = {lab: [d["source"], d.get("members", [])]
+                for lab, d in data[n]["meta"].get("ff_session", {}).items()}
+        if want != have:
+            log(f"  [{n}] flat-field decision changed -> rebuilding mosaic")
+            it = next(i for i in cfg["images"] if i["name"] == n)
+            st = prepare_image(cfg, it, infos[n], labs, reg_idx, log)
+            data[n] = finish_tiles(cfg, st, labs, decisions, log)
+    return data
 
 
 # ------------------------------------------------------------------ main
@@ -338,10 +536,8 @@ def run(config_path, force=False, force_segmentation=False):
 
     # ---- pass 1
     log("--- pass 1: projection, flat-field, stitching")
-    data = {}
-    for it in cfg["images"]:
-        mosaic, valid, meta = build_mosaic(cfg, it, labs, labs.index(reg_lab), log)
-        data[it["name"]] = {"mosaic": mosaic, "valid": valid, "meta": meta}
+    data = build_mosaics(cfg, infos, labs, labs.index(reg_lab), log)
+    data = {it["name"]: data[it["name"]] for it in cfg["images"]}  # keep config order
 
     # ---- pass 2: experiment-wide segmentation normalisation
     if reused and "segmentation_norm" in reused:
@@ -416,6 +612,7 @@ def run(config_path, force=False, force_segmentation=False):
     log("display ranges: " + ", ".join(f"{k}: {v[0]:.1f}-{v[1]:.1f}" for k, v in ranges.items()))
 
     lut = {lab: LUT_RGB.get(colors[lab], LUT_RGB["gray"]) for lab in labs}
+    plots.set_series_order(labs)   # fixed line style + marker shape per channel
     phex = {lab: PLOT_HEX.get(colors[lab], PLOT_HEX["gray"]) for lab in labs}
 
     # shared y-limits per channel (and for the overlay) across all images

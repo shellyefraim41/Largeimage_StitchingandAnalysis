@@ -5,6 +5,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import textwrap
+
 import numpy as np
 from matplotlib.patches import Rectangle
 from skimage.segmentation import find_boundaries
@@ -222,4 +224,48 @@ def segmentation_overview(seg_img, labels, out_png):
     ax.set_title("whole image: segmented area tinted red. Check that no colonies are missed.", loc="left", fontsize=10)
     ax.axis("off")
     fig.savefig(out_png, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+def session_check(name, decisions, labs, out_png):
+    """For each channel whose own flat-field fit failed: does this image's illumination (other,
+    well-measured channels) match the rest of the session? If yes, the session fit is used."""
+    rows = list(decisions.items())
+    ncol = 1 + max(len(d.get("checks", {})) for _, d in rows)
+    fig, axs = plt.subplots(len(rows), ncol, figsize=(4.6 * ncol, 3.6 * len(rows)), squeeze=False)
+    for r, (lab, d) in enumerate(rows):
+        checks = d.get("checks", {})
+        lim = d.get("limits", {})
+        for c, (k, v) in enumerate(checks.items()):
+            ax = axs[r, c]
+            x = np.arange(len(v["own_x"])) * 8
+            ax.plot(x, v["session_x"], color="#a9a8a2", lw=3, label="rest of the session")
+            ax.plot(x, v["own_x"], color="#2a78d6", lw=2, label="this image")
+            ok = v["x_rms"] <= lim.get("x_rms", 1) and v["field_rms"] <= lim.get("field_rms", 1)
+            ax.set_title(f"check {k}: X diff {v['x_rms']:.1%} (limit {lim.get('x_rms', 0):.0%}), "
+                         f"field {v['field_rms']:.1%} (limit {lim.get('field_rms', 0):.0%})\n"
+                         + ("PASS" if ok else "FAIL"), loc="left", fontsize=9,
+                         color=INK if ok else "#e34948")
+            ax.set_xlabel("x in tile (px)", fontsize=9)
+            ax.set_ylabel("illumination (mean 1)", fontsize=9)
+            ax.legend(frameon=False, fontsize=8)
+            _style(ax)
+        ax = axs[r, len(checks)]
+        if d.get("session_x"):
+            x = np.arange(len(d["session_x"])) * 8
+            ax.plot(x, d["session_x"], color="#2a78d6" if d["source"] == "session" else "#a9a8a2", lw=2)
+            ax.set_xlabel("x in tile (px)", fontsize=9)
+            _style(ax)
+        else:
+            ax.axis("off")
+        msg = (f"{lab}: USED session flat-field\nfrom {', '.join(d['members'])}" if d["source"] == "session"
+               else f"{lab}: NOT corrected\n{d['reason']}")
+        ax.set_title("\n".join(textwrap.wrap(msg, 55)), loc="left", fontsize=9,
+                     color=INK if d["source"] == "session" else "#e34948")
+        for c in range(len(checks) + 1, ncol):
+            axs[r, c].axis("off")
+    fig.suptitle(f"{name}: session flat-field for weak channels (same day + same optics, other channels must match)",
+                 x=0.01, ha="left", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=100)
     plt.close(fig)

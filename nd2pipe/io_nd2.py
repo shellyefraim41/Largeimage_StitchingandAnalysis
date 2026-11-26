@@ -5,6 +5,7 @@ pre-stitched images never need the full Z-stack in memory.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -82,9 +83,30 @@ def read_info(path: str | Path) -> ND2Info:
         try:
             info.extra["description"] = f.text_info.get("description", "")
             info.extra["date"] = f.text_info.get("date", "")
+            cap = f.text_info.get("capturing", "") or ""
+            info.extra["camera"] = cap.splitlines()[0].strip() if cap else ""
+            mb = re.search(r"Binning:\s*(\S+)", cap)
+            info.extra["binning"] = mb.group(1) if mb else ""
+        except Exception:
+            pass
+        try:
+            mic = f.metadata.channels[0].microscope
+            info.extra["objective"] = mic.objectiveName or ""
+            info.extra["modality"] = ",".join(mic.modalityFlags or [])
         except Exception:
             pass
     return info
+
+
+def session_key(info: ND2Info):
+    """Images with the same key were taken on the same day with the same optics and camera
+    settings, so they share one illumination profile. None if the date is unknown."""
+    date = (info.extra.get("date") or "").strip()
+    if not date:
+        return None
+    day = date.split()[0]
+    return (day, info.extra.get("objective", ""), info.extra.get("camera", ""), info.extra.get("binning", ""),
+            info.extra.get("modality", ""), round(info.pixel_um, 5), info.height, info.width, tuple(info.channels))
 
 
 def iter_mips(path: str | Path, positions=None):

@@ -82,6 +82,7 @@ The data are binned along X (`profile.bin_um`, default 50 µm). In each bin:
 - **Cell count:** shown in the lower panel.
 - **Outlier cells** (debris, more than 20 robust SDs above the median) are excluded from both averages. They stay in the cell table with a flag.
 - **`profile.statistic: median`** plots the median instead of the mean.
+- **Colour-blind safe plots:** each channel differs by colour, line style and marker shape: circle, square, triangle, star, diamond, and so on, in the channel order of the ND2. A channel keeps its shape in every plot. In the comparison plots across images, each image has its own shape.
 - **Normalisation in overlay plots:** in plots with several channels, each channel is divided by its average cell across the whole experiment. On the y-axis, 1 means the average cell of that channel, so a weak channel is no longer flattened by DAPI. The same factor is used for every image, so the images can still be compared with each other. Set `profile.overlay_normalize` to `image_mean` (each image scaled to its own average) or `none` (raw values). The factors are saved in `experiment_settings.json`, and the profile CSV has extra `*_norm` columns. The single-channel plots stay raw.
 
 ## Flat-field: important for acquisition
@@ -91,3 +92,8 @@ The data are binned along X (`profile.bin_um`, default 50 µm). In each bin:
   - **Photobleaching of the second exposure** (~4–5% for DAPI/GFP) cannot be separated from an off-centre beam.
 - **Recommended:** record a flat-field reference every imaging session. Image a fluorescent slide or a dye layer with each laser line and the same objective, at about 10–20 positions, and set it as `flatfield.reference`. With 10–20% overlap this is enough; 30% also works.
 - **Prefer tiled (multipoint) acquisitions.** NIS-stitched images cannot be illumination-corrected here.
+- **Weak channels borrow the session's correction.** Sometimes a channel has too little signal in its own overlaps to fit the illumination, for example a marker that is off in part of the sample. That channel then gets the fit pooled from the other tiled images of the same session, but only when both of these hold:
+  1. **Same session:** both images were acquired on the same day, with the same objective, camera, binning, pixel size, tile size and channels. This is read from the ND2 files.
+  2. **The image's other channels match the session:** the image's well-measured channels must agree with the rest of the session within 3% along X and 5% over the field. Same-day images differ by ≤ 1.6% and ≤ 3.1%. This confirms the optics really were the same for this image.
+
+  Otherwise the channel is left uncorrected, with a warning. `QC/03_flatfield_session_check.png` shows the comparison and the decision. To switch this off, set `flatfield.session_pooling: false`. The limits are `session_check_x_rms` and `session_check_field_rms`.
