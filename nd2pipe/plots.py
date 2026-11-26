@@ -13,6 +13,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
+
+# vector output that opens in Illustrator with editable text (TrueType, not outlines / Type 3)
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
+matplotlib.rcParams["svg.fonttype"] = "none"
 
 INK = "#0b0b0b"
 INK2 = "#52514e"
@@ -21,6 +27,22 @@ LINESTYLES = ["-", "--", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1)), (0, (1, 1)),
 # colour-blind safe identity: colour + line style + marker shape (circle, square, triangle, star, ...)
 MARKERS = ["o", "s", "^", "*", "D", "v", "P", "X"]
 _ORDER = {}
+_FORMATS = ["png"]
+
+
+def set_formats(fmts):
+    """File types for every profile plot, e.g. ['png', 'pdf'] (png is always written)."""
+    fmts = [str(f).lower().lstrip(".") for f in ([fmts] if isinstance(fmts, str) else (fmts or []))]
+    bad = [f for f in fmts if f not in ("png", "pdf", "svg")]
+    if bad:
+        raise ValueError(f"profile.plot_formats: unknown {bad}; use png, pdf, svg")
+    _FORMATS[:] = ["png"] + [f for f in dict.fromkeys(fmts) if f != "png"]
+
+
+def _save(fig, out_png, **kw):
+    out_png = Path(out_png)
+    for f in _FORMATS:
+        fig.savefig(out_png.with_suffix("." + f), **kw)
 
 
 def set_series_order(names):
@@ -138,7 +160,7 @@ def plot_channel(prof, lab, color_hex, out_png, title, bin_um, min_cells, ylim=N
     ax.legend(frameon=False, fontsize=9, loc="upper right")
     _style(ax)
     _count_panel(axn, d, bin_um, min_cells)
-    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    _save(fig, out_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -173,7 +195,7 @@ def plot_overlay(prof, labs, colors_hex, out_png, title, bin_um, min_cells, ylim
     _style(ax)
     _count_panel(axn, d0, bin_um, min_cells)
     _end_labels(ax, items)
-    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    _save(fig, out_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -212,7 +234,7 @@ def plot_image_with_profile(rgb, width_um, height_um, prof, labs, colors_hex, ou
     _count_panel(axn, d0, bin_um, min_cells)
     axn.set_xlim(0, width_um)
     _end_labels(ax, items)
-    fig.savefig(out_png, dpi=200)
+    _save(fig, out_png, dpi=200)
     plt.close(fig)
 
 
@@ -236,7 +258,7 @@ def plot_images_compare(profs: dict, lab, series_hex, out_png, title, ylim=None,
     ax.legend(frameon=False, fontsize=9, loc="upper right")
     _style(ax)
     _end_labels(ax, items)
-    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    _save(fig, out_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
     _ORDER.clear()
     _ORDER.update(saved)

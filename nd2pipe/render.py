@@ -7,6 +7,8 @@ import numpy as np
 import tifffile
 from PIL import Image
 
+from .config import fname
+
 Image.MAX_IMAGE_PIXELS = None
 
 
@@ -102,21 +104,21 @@ def render_image(mosaic, valid, labels_names, colors_rgb, ranges, merge_sel, out
     ch_dir.mkdir(parents=True, exist_ok=True)
     units = {}
     for c, lab in enumerate(labels_names):
-        save_float_tiff(ch_dir / f"{name}_{lab}.tif", np.where(valid, mosaic[c], 0), pixel_um)
+        save_float_tiff(ch_dir / f"{name}_{fname(lab)}.tif", np.where(valid, mosaic[c], 0), pixel_um)
         u = to_unit(mosaic[c], *ranges[lab])
         u[~valid] = 0
         units[lab] = u
         rgb = add_scale_bar(to_uint8(colorize(u, colors_rgb[lab])), pixel_um, scale_bar)
-        save_rgb(ch_dir / f"{name}_{lab}.png", rgb, ch_dir / f"{name}_{lab}_preview.jpg", preview_width)
+        save_rgb(ch_dir / f"{name}_{fname(lab)}.png", rgb, ch_dir / f"{name}_{fname(lab)}_preview.jpg", preview_width)
         gray = (u * 255 + 0.5).astype(np.uint8)
-        Image.fromarray(gray).save(str(ch_dir / f"{name}_{lab}_gray8.png"))
+        Image.fromarray(gray).save(str(ch_dir / f"{name}_{fname(lab)}_gray8.png"))
     if merge_sel:
         mg_dir.mkdir(parents=True, exist_ok=True)
         acc = np.zeros(mosaic.shape[1:] + (3,), np.float32)
         for lab in merge_sel:
             acc += colorize(units[lab], colors_rgb[lab])
         rgb = to_uint8(acc)
-        tag = "-".join(merge_sel)
+        tag = "-".join(fname(l) for l in merge_sel)
         save_rgb(mg_dir / f"{name}_merge_{tag}.png", add_scale_bar(rgb, pixel_um, scale_bar),
                  mg_dir / f"{name}_merge_{tag}_preview.jpg", preview_width)
         tifffile.imwrite(str(mg_dir / f"{name}_merge_{tag}.tif"), rgb, photometric="rgb",

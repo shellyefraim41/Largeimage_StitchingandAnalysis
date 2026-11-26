@@ -59,6 +59,9 @@ profile:
   # merged / overlay plots: experiment_mean (1 = average cell of that channel in this experiment,
   # same factor for every image) | image_mean (each image to its own average) | none (raw intensity)
   overlay_normalize: experiment_mean
+  # every profile plot is saved in these formats; pdf (or svg) = vector, opens in Illustrator
+  # with editable lines and text. Use [png] for PNG only.
+  plot_formats: [png, pdf]
 
 display:
   high_percentile: 99.5   # brightest 0.5% of cell pixels are saturated in the PNGs

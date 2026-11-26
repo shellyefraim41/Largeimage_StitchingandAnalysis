@@ -20,7 +20,7 @@ import tifffile
 
 from . import flatfield as ffm
 from . import measure, plots, qc, render, segment, stitch
-from .config import IMAGE_SERIES_HEX, LUT_RGB, PLOT_HEX, default_color, default_label, load_config
+from .config import IMAGE_SERIES_HEX, LUT_RGB, PLOT_HEX, default_color, default_label, fname, load_config
 from .io_nd2 import iter_mips, read_info, session_key
 
 
@@ -354,7 +354,7 @@ def finish_tiles(cfg, st, labs, session, log):
             else:
                 meta["flatfield"][lab] = f"{o['note']} -> not corrected ({d['reason']})"
                 meta["warnings"].append(f"{lab}: flat-field not corrected ({d['reason']})")
-        qc.flatfield(lab, F[c], st["samples"][lab], finfo, method, qdir / f"03_flatfield_{c + 1}_{lab}.png")
+        qc.flatfield(lab, F[c], st["samples"][lab], finfo, method, qdir / f"03_flatfield_{c + 1}_{fname(lab)}.png")
         x, r, m_after = ffm.ratio_curve(st["samples"][lab], F[c], "x")
         meta.setdefault("overlap_ratio_after", {})[lab] = float(m_after) if np.size(m_after) else None
     f_check = qdir / "03_flatfield_session_check.png"
@@ -613,6 +613,7 @@ def run(config_path, force=False, force_segmentation=False):
 
     lut = {lab: LUT_RGB.get(colors[lab], LUT_RGB["gray"]) for lab in labs}
     plots.set_series_order(labs)   # fixed line style + marker shape per channel
+    plots.set_formats(pcfg.get("plot_formats", ["png", "pdf"]))
     phex = {lab: PLOT_HEX.get(colors[lab], PLOT_HEX["gray"]) for lab in labs}
 
     # shared y-limits per channel (and for the overlay) across all images
@@ -700,17 +701,17 @@ def run(config_path, force=False, force_segmentation=False):
         pdir = base / "profiles"
         pdir.mkdir(exist_ok=True)
         for c, lab in enumerate(labs):
-            plots.plot_channel(d["prof"], lab, phex[lab], pdir / f"{name}_profile_{c + 1}_{lab}.png",
+            plots.plot_channel(d["prof"], lab, phex[lab], pdir / f"{name}_profile_{c + 1}_{fname(lab)}.png",
                                f"{name} - {lab}", pcfg["bin_um"], pcfg["min_cells_per_bin"], ylims[lab],
                                pcfg["show_pixel_mean"], stat)
-        plots.plot_overlay(d["prof"], ov_sel, phex, pdir / f"{name}_profile_overlay_{'-'.join(ov_sel)}.png",
+        plots.plot_overlay(d["prof"], ov_sel, phex, pdir / f"{name}_profile_overlay_{'-'.join(map(fname, ov_sel))}.png",
                            f"{name} - {' + '.join(ov_sel)}", pcfg["bin_um"], pcfg["min_cells_per_bin"], ylim_ov,
                            stat, suffix, ov_ylabel)
         if small is not None:
             H, W = d["mosaic"].shape[1:]
             plots.plot_image_with_profile(
                 small, W * px, H * px, d["prof"], merge_sel, phex,
-                pdir / f"{name}_merge_with_profile_{'-'.join(merge_sel)}.png",
+                pdir / f"{name}_merge_with_profile_{'-'.join(map(fname, merge_sel))}.png",
                 f"{name} - {' + '.join(merge_sel)}", pcfg["bin_um"], pcfg["min_cells_per_bin"],
                 ylim_overlay(merge_sel), stat, suffix, ov_ylabel)
         log(f"  [{name}] images and plots written")
@@ -718,7 +719,7 @@ def run(config_path, force=False, force_segmentation=False):
     if len(data) > 1:
         profs = {n: d["prof"] for n, d in data.items()}
         for c, lab in enumerate(labs):
-            plots.plot_images_compare(profs, lab, IMAGE_SERIES_HEX, exp_dir / f"compare_images_{c + 1}_{lab}.png",
+            plots.plot_images_compare(profs, lab, IMAGE_SERIES_HEX, exp_dir / f"compare_images_{c + 1}_{fname(lab)}.png",
                                       f"{cfg['experiment_name']} - {lab}: all images", ylims[lab], stat)
     allp = pd.concat([d["prof"].assign(image=n) for n, d in data.items()])
     allp.to_csv(exp_dir / "all_profiles_x.csv", index=False)

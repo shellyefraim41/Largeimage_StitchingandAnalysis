@@ -6,6 +6,7 @@ display ranges / thresholds are computed once for the whole experiment.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 
 import yaml
@@ -69,6 +70,8 @@ DEFAULTS = {
         # multi-channel overlay plots: experiment_mean (1 = average cell of that channel over all
         # images, same factor for every image), image_mean (each image to its own average), none (raw)
         "overlay_normalize": "experiment_mean",
+        # file types of every profile plot; pdf/svg are vectors with editable text (Illustrator)
+        "plot_formats": ["png", "pdf"],
     },
     "display": {
         "low": "background",          # 'background' (pooled background median) or a percentile number
@@ -128,6 +131,7 @@ def load_config(path: str | Path) -> dict:
         item = dict(item)
         item["path"] = resolve(item["path"])
         item.setdefault("name", item["path"].stem)
+        item["name"] = fname(item["name"])
         imgs.append(item)
     if not imgs:
         raise ValueError("config has no 'images'")
@@ -165,6 +169,13 @@ def default_color(name: str, emission_nm: float | None) -> str:
             return "red"
         return "magenta"
     return "gray"
+
+
+def fname(text: str) -> str:
+    """Text made safe for a file name on Windows/macOS/Linux: 'pSMAD1/5/9' -> 'pSMAD1-5-9'.
+    Labels keep their real text in plots and tables; only file names use this."""
+    out = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", str(text)).strip(" .")
+    return out or "channel"
 
 
 def default_label(name: str) -> str:
