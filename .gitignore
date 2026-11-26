@@ -1,0 +1,16 @@
+# data and results (large, stay local)
+output/
+test/
+*.nd2
+*.tif
+*.tiff
+*.npy
+
+# personal experiment configs (contain local paths); experiment_test.yaml is the example
+*.yaml
+!experiment_test.yaml
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

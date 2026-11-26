@@ -1,0 +1,36 @@
+# Experiment config: every image listed here is processed with the same settings,
+# display ranges and thresholds. Paths are relative to this file.
+
+experiment_name: CHIR_CDM2_device_test
+output_dir: output/CHIR_CDM2_device_test
+
+images:
+  - path: test/device_CHIRleftCDM2right_LGpoints.nd2   # 11 tiles -> stitched here
+    name: LGpoints
+  - path: test/device_CHIRleftCDM2right_LG.nd2         # already stitched by NIS
+    name: LG_NISstitched
+
+channels:                     # ND2 channel name -> label and colour (optional)
+  DAPI-50: {label: DAPI, color: blue}
+  GFP-50:  {label: GFP,  color: green}
+  RFP-50:  {label: RFP,  color: red}
+
+# 'ask' = prompt once when the run starts (Enter = all, 'none' = no merge),
+# 'all', 'none', or a list such as [DAPI, RFP]
+merge_channels: ask
+
+camera_offset: auto           # ORCA-Fusion offset is 100; 'auto' measures it
+
+flatfield:
+  method: auto                # auto: reference if given, else fitted from tile overlaps
+  reference: null             # e.g. flatfield/2026-11-22_chroma_slide.nd2 (same channel names)
+
+stitching:
+  blend: feather              # feather | nearest
+
+segmentation:
+  channels: [DAPI]            # cytoplasmic RNA-FISH later: [Phalloidin, DAPI]
+
+profile:
+  bin_um: 50
+  min_cells_per_bin: 10

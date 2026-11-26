@@ -1,0 +1,13 @@
+# tested with Python 3.12 and these versions
+nd2>=0.12
+numpy>=2.1
+scipy>=1.16
+scikit-image>=0.26
+pandas>=3.0
+matplotlib>=3.10
+tifffile>=2025.6
+Pillow
+PyYAML>=6.0
+cellpose>=4.0
+# for GPU segmentation, install the CUDA build of torch first, see https://pytorch.org
+torch>=2.7
